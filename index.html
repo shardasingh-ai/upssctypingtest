@@ -40,8 +40,8 @@
   .inputbox{min-height:160px; overflow:auto; border:1px solid #e5e7eb; border-radius:12px; padding:16px; background:#f8fafc}
 
   /* Typing visuals */
-  #textDisplay span.ok{ color:#6b7280; }          /* correct = grey text only */
-  #textDisplay span.err{ color:var(--err-red); }  /* wrong = red text only */
+  #textDisplay span.ok{ color:#6b7280; }
+  #textDisplay span.err{ color:var(--err-red); }
   #textDisplay span.cur{ background:var(--cur-yellow); color:#111827; padding:2px 3px; border-radius:4px }
 
   .grid{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px}
@@ -303,7 +303,6 @@ document.addEventListener('DOMContentLoaded', function(){
   }
 
   /* ===== Two-word backspace limit (robust & minimal) ===== */
-  // Compute index AFTER the 3rd-from-last space of PREVIOUS text; -1 if ≤2 spaces (no lock)
   function computeLockIndex(val){
     const spaces = [];
     for (let i=0;i<val.length;i++){ if (val[i] === ' ') spaces.push(i); }
@@ -311,8 +310,8 @@ document.addEventListener('DOMContentLoaded', function(){
     return spaces[spaces.length - 3] + 1;
   }
 
-  let lockIdx = -1;      // boundary for current value
-  let prevLockIdx = -1;  // boundary for previous value (used to judge the incoming change)
+  let lockIdx = -1;
+  let prevLockIdx = -1;
   let lastVal = '';
   let lastSelStart = 0;
   let lastSelEnd = 0;
@@ -330,6 +329,31 @@ document.addEventListener('DOMContentLoaded', function(){
   function violatesPrefixLock(prev, next, boundary){
     if (boundary < 0) return false;
     return next.slice(0, boundary) !== prev.slice(0, boundary);
+  }
+
+  // NEW helper: correctly decide if a delete/cut crosses the boundary
+  function deletionCrossesBoundary(inputType, selStart, selEnd, boundary){
+    if (boundary < 0) return false;
+    const collapsed = selStart === selEnd;
+
+    switch (inputType) {
+      case 'deleteContentBackward': {
+        if (collapsed) return (selStart - 1) <= boundary; // backspace deletes char BEFORE caret
+        return Math.min(selStart, selEnd) <= boundary;     // any selection touching boundary
+      }
+      case 'deleteContentForward':
+      case 'deleteByDrag':
+      case 'deleteByComposition':
+      case 'historyUndo': {
+        if (collapsed) return selStart <= boundary;        // delete forward removes at caret
+        return Math.min(selStart, selEnd) <= boundary;
+      }
+      case 'deleteByCut': {
+        return Math.min(selStart, selEnd) <= boundary;
+      }
+      default:
+        return false;
+    }
   }
 
   /* ===== Flow ===== */
@@ -416,8 +440,8 @@ document.addEventListener('DOMContentLoaded', function(){
       const span = spans[i];
       const tw = typedWords[i];
       if (tw==null){ continue; }
-      if (tw === refWords[i]) span.classList.add('ok');   // grey text
-      else { span.classList.add('err'); partial++; }      // red text
+      if (tw === refWords[i]) span.classList.add('ok');
+      else { span.classList.add('err'); partial++; }
     }
     if (typedWords.length < refWords.length){ full = refWords.length - typedWords.length; }
     if (typedWords.length > refWords.length){ partial += (typedWords.length - refWords.length); }
@@ -488,14 +512,14 @@ document.addEventListener('DOMContentLoaded', function(){
     }
   });
 
-  /* ===== Keep caret out of locked region (based on CURRENT lockIdx) ===== */
+  /* Keep caret out of locked region (based on CURRENT lockIdx) */
   els.inputArea.addEventListener('select', snapCaretIfNeeded);
   document.addEventListener('selectionchange', function(){
     if (!started) return;
     if (document.activeElement === els.inputArea) snapCaretIfNeeded();
   });
   function snapCaretIfNeeded(){
-    if (lockIdx < 0) return; // no lock
+    if (lockIdx < 0) return;
     const s = els.inputArea.selectionStart;
     const e = els.inputArea.selectionEnd;
     const leftMost = Math.min(s, e);
@@ -505,20 +529,20 @@ document.addEventListener('DOMContentLoaded', function(){
     }
   }
 
-  /* ===== Primary: beforeinput (use PREVIOUS boundary) ===== */
+  /* ===== Primary: beforeinput (uses PREVIOUS boundary) ===== */
   els.inputArea.addEventListener('beforeinput', function(e){
     if (!started) return;
 
-    // Snapshot previous state & boundary for this incoming change
     const prevVal = els.inputArea.value;
     prevLockIdx = computeLockIndex(prevVal);
-    snapshotTextarea(); // store lastVal, selection positions
+    snapshotTextarea();
 
     const t = e.inputType;
 
     if (t === 'insertFromPaste' || t === 'insertFromDrop'){
       showToast('⚠️ CTRL/CMD or Paste not allowed');
-      e.preventDefault(); return;
+      e.preventDefault(); 
+      return;
     }
 
     const deletionTypes = new Set([
@@ -528,25 +552,28 @@ document.addEventListener('DOMContentLoaded', function(){
     if (deletionTypes.has(t) && prevLockIdx >= 0){
       const selStart = e.target.selectionStart;
       const selEnd   = e.target.selectionEnd;
-      const leftMost = Math.min(selStart, selEnd);
-      if (leftMost <= prevLockIdx){ e.preventDefault(); return; }
+      if (deletionCrossesBoundary(t, selStart, selEnd, prevLockIdx)){
+        e.preventDefault(); 
+        return;
+      }
     }
   });
 
-  /* ===== Keydown fallback (also uses PREVIOUS boundary) ===== */
+  /* ===== Keydown fallback (uses PREVIOUS boundary) ===== */
   els.inputArea.addEventListener('keydown', function(e){
     if (!started) return;
 
     if (e.ctrlKey || e.metaKey){
       if (e.key !== 'Control' && e.key !== 'Meta'){ showToast('⚠️ CTRL/CMD or Paste not allowed'); }
-      e.preventDefault(); return;
+      e.preventDefault(); 
+      return;
     }
     if (e.shiftKey && e.key === 'Insert'){
       showToast('⚠️ CTRL/CMD or Paste not allowed');
-      e.preventDefault(); return;
+      e.preventDefault(); 
+      return;
     }
 
-    // Snapshot current text as "previous" for this keystroke
     const prevVal = els.inputArea.value;
     prevLockIdx = computeLockIndex(prevVal);
     snapshotTextarea();
@@ -564,14 +591,18 @@ document.addEventListener('DOMContentLoaded', function(){
         const nextPos = (e.key==='Home') ? 0 : s - 1;
         if (Math.min(nextPos, en) <= prevLockIdx){
           els.inputArea.setSelectionRange(prevLockIdx + 1, prevLockIdx + 1);
-          e.preventDefault(); return;
+          e.preventDefault(); 
+          return;
         }
       }
       if (e.key === 'Backspace' || e.key === 'Delete'){
-        const s = els.inputArea.selectionStart;
-        const en = els.inputArea.selectionEnd;
-        const leftMost = Math.min(s, en);
-        if (leftMost <= prevLockIdx){ e.preventDefault(); return; }
+        const selStart = els.inputArea.selectionStart;
+        const selEnd   = els.inputArea.selectionEnd;
+        const simulatedType = (e.key === 'Backspace') ? 'deleteContentBackward' : 'deleteContentForward';
+        if (deletionCrossesBoundary(simulatedType, selStart, selEnd, prevLockIdx)){
+          e.preventDefault(); 
+          return;
+        }
       }
     }
   });
@@ -582,7 +613,6 @@ document.addEventListener('DOMContentLoaded', function(){
 
     const newVal = els.inputArea.value;
 
-    // Judge the new value against the PREVIOUS boundary
     if (violatesPrefixLock(lastVal, newVal, prevLockIdx)){
       els.inputArea.value = lastVal;
       const safe = Math.max(prevLockIdx + 1, 0);
@@ -591,7 +621,6 @@ document.addEventListener('DOMContentLoaded', function(){
       return;
     }
 
-    // Accept change -> update highlights and CURRENT boundary
     highlightProgress();
     snapshotTextarea();
     updateLockIndex();
