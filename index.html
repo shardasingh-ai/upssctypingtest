@@ -299,10 +299,11 @@ document.addEventListener('DOMContentLoaded', function(){
     setFonts(); setPassage('');
     setButtonsRunning(false);
     snapshotTextarea();
+    lockIdx = -1; prevLockIdx = -1;
   }
 
-  /* ===== Two-word backspace limit (core) ===== */
-  // Compute index AFTER the 3rd-from-last space; return -1 if fewer than 3 spaces (no lock yet)
+  /* ===== Two-word backspace limit (robust & minimal) ===== */
+  // Compute index AFTER the 3rd-from-last space of PREVIOUS text; -1 if ≤2 spaces (no lock)
   function computeLockIndex(val){
     const spaces = [];
     for (let i=0;i<val.length;i++){ if (val[i] === ' ') spaces.push(i); }
@@ -310,16 +311,14 @@ document.addEventListener('DOMContentLoaded', function(){
     return spaces[spaces.length - 3] + 1;
   }
 
-  // Track current and previous lock indices
-  let lockIdx = -1;      // for current value
-  let prevLockIdx = -1;  // captured before each change
+  let lockIdx = -1;      // boundary for current value
+  let prevLockIdx = -1;  // boundary for previous value (used to judge the incoming change)
   let lastVal = '';
   let lastSelStart = 0;
   let lastSelEnd = 0;
 
   function snapshotTextarea(){
     lastVal = els.inputArea.value;
-    prevLockIdx = lockIdx;                 // store current lock as "previous" boundary
     try{
       lastSelStart = els.inputArea.selectionStart;
       lastSelEnd   = els.inputArea.selectionEnd;
@@ -328,7 +327,6 @@ document.addEventListener('DOMContentLoaded', function(){
   function updateLockIndex(){
     lockIdx = computeLockIndex(els.inputArea.value);
   }
-
   function violatesPrefixLock(prev, next, boundary){
     if (boundary < 0) return false;
     return next.slice(0, boundary) !== prev.slice(0, boundary);
@@ -354,7 +352,6 @@ document.addEventListener('DOMContentLoaded', function(){
     }
     setPassage(passage); setFonts(); highlightProgress();
 
-    // Initialize guards
     snapshotTextarea();
     updateLockIndex();
 
@@ -373,13 +370,8 @@ document.addEventListener('DOMContentLoaded', function(){
   function openInstructionsAndStart(){
     els.instrBody.innerHTML = INSTRUCTIONS_HTML;
     els.instrBackdrop.classList.add('show');
-
     const ok = ()=>{ els.instrBackdrop.classList.remove('show'); instructionsShownOnce = true; actuallyStartStage(); };
     const cancel = ()=>{ els.instrBackdrop.classList.remove('show'); setButtonsRunning(false); };
-
-    const onKey = (e)=>{ if (e.key==='Escape'){ cancel(); } };
-    document.addEventListener('keydown', onKey, { once:true });
-
     els.instrOk.onclick = ok;
     els.instrCancel.onclick = cancel;
   }
@@ -459,7 +451,6 @@ document.addEventListener('DOMContentLoaded', function(){
       els.grossHI.innerHTML=grossWPM.toFixed(2)+'<span class="u"> WPM</span>';
       els.netHI.innerHTML=netWPM.toFixed(2)+'<span class="u"> WPM</span>';
       els.fullHI.textContent=full; els.partialHI.textContent=partial;
-      els.penaltyHI.innerHTML=penaltyWords+'<span class="u"> Words</span>';
       els.badgeHI.className = passed ? 'pill-pass' : 'pill-fail';
       els.bothResults.classList.remove('hidden'); els.preResultsNote.classList.add('hidden');
     }
@@ -497,7 +488,7 @@ document.addEventListener('DOMContentLoaded', function(){
     }
   });
 
-  /* ===== Keep caret out of locked region (based on current lockIdx) ===== */
+  /* ===== Keep caret out of locked region (based on CURRENT lockIdx) ===== */
   els.inputArea.addEventListener('select', snapCaretIfNeeded);
   document.addEventListener('selectionchange', function(){
     if (!started) return;
@@ -514,12 +505,14 @@ document.addEventListener('DOMContentLoaded', function(){
     }
   }
 
-  /* ===== Primary: beforeinput ===== */
+  /* ===== Primary: beforeinput (use PREVIOUS boundary) ===== */
   els.inputArea.addEventListener('beforeinput', function(e){
     if (!started) return;
 
-    // Snapshot *before* change; prevLockIdx is set here
-    snapshotTextarea();
+    // Snapshot previous state & boundary for this incoming change
+    const prevVal = els.inputArea.value;
+    prevLockIdx = computeLockIndex(prevVal);
+    snapshotTextarea(); // store lastVal, selection positions
 
     const t = e.inputType;
 
@@ -540,12 +533,9 @@ document.addEventListener('DOMContentLoaded', function(){
     }
   });
 
-  /* ===== Keydown fallback ===== */
+  /* ===== Keydown fallback (also uses PREVIOUS boundary) ===== */
   els.inputArea.addEventListener('keydown', function(e){
     if (!started) return;
-
-    const changeKeys = ['Backspace','Delete','Enter',' ','ArrowLeft','Home'];
-    if (e.key && changeKeys.includes(e.key)) snapshotTextarea();
 
     if (e.ctrlKey || e.metaKey){
       if (e.key !== 'Control' && e.key !== 'Meta'){ showToast('⚠️ CTRL/CMD or Paste not allowed'); }
@@ -556,43 +546,43 @@ document.addEventListener('DOMContentLoaded', function(){
       e.preventDefault(); return;
     }
 
-    const val = els.inputArea.value;
+    // Snapshot current text as "previous" for this keystroke
+    const prevVal = els.inputArea.value;
+    prevLockIdx = computeLockIndex(prevVal);
+    snapshotTextarea();
 
     if (e.key === ' '){
       const refCount = passage.split(/\s+/).length;
-      const typedCount = (val.trim().length ? val.trim().split(/\s+/).length : 0);
+      const typedCount = (prevVal.trim().length ? prevVal.trim().split(/\s+/).length : 0);
       if (typedCount >= refCount){ e.preventDefault(); return; }
     }
 
-    // Use prevLockIdx snapshot for *this* change if we have one, otherwise lockIdx
-    const boundary = (typeof prevLockIdx === 'number') ? prevLockIdx : lockIdx;
-
-    if (boundary >= 0){
+    if (prevLockIdx >= 0){
       if (e.key === 'ArrowLeft' || e.key === 'Home'){
         const s = els.inputArea.selectionStart;
-        const ePos = els.inputArea.selectionEnd;
+        const en = els.inputArea.selectionEnd;
         const nextPos = (e.key==='Home') ? 0 : s - 1;
-        if (Math.min(nextPos, ePos) <= boundary){
-          els.inputArea.setSelectionRange(boundary + 1, boundary + 1);
+        if (Math.min(nextPos, en) <= prevLockIdx){
+          els.inputArea.setSelectionRange(prevLockIdx + 1, prevLockIdx + 1);
           e.preventDefault(); return;
         }
       }
       if (e.key === 'Backspace' || e.key === 'Delete'){
         const s = els.inputArea.selectionStart;
-        const ePos = els.inputArea.selectionEnd;
-        const leftMost = Math.min(s, ePos);
-        if (leftMost <= boundary){ e.preventDefault(); return; }
+        const en = els.inputArea.selectionEnd;
+        const leftMost = Math.min(s, en);
+        if (leftMost <= prevLockIdx){ e.preventDefault(); return; }
       }
     }
   });
 
-  /* ===== Ultimate fallback: input revert ===== */
+  /* ===== Ultimate fallback: input revert (authoritative) ===== */
   els.inputArea.addEventListener('input', function(){
     if (!started) return;
 
     const newVal = els.inputArea.value;
 
-    // Violations must be checked against prevLockIdx (boundary of the *previous* text)
+    // Judge the new value against the PREVIOUS boundary
     if (violatesPrefixLock(lastVal, newVal, prevLockIdx)){
       els.inputArea.value = lastVal;
       const safe = Math.max(prevLockIdx + 1, 0);
@@ -601,10 +591,10 @@ document.addEventListener('DOMContentLoaded', function(){
       return;
     }
 
-    // Accept new value → update highlights, snapshots, and recompute CURRENT boundary
+    // Accept change -> update highlights and CURRENT boundary
     highlightProgress();
-    updateLockIndex();
     snapshotTextarea();
+    updateLockIndex();
   });
 
   // Block paste via context menu
