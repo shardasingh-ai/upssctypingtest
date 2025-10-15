@@ -134,7 +134,7 @@
           autocorrect="off" autocomplete="off" autocapitalize="off" spellcheck="false"
           style="width:100%; height:140px; border:none; outline:none; background:transparent; font-size:14px; line-height:1.6;"></textarea>
       </div>
-      <small class="note">Backspace/Delete/Cut are limited to edits within the last two spaces of your typed text.</small>
+      <small class="note">Backspace/Delete/Cut are limited to the <b>current word and the immediate previous word</b>.</small>
     </section>
 
     <!-- Results -->
@@ -298,28 +298,53 @@ document.addEventListener('DOMContentLoaded', function(){
     els.fontLabel.classList.add('hidden'); els.hindiFont.classList.add('hidden');
     setFonts(); setPassage('');
     setButtonsRunning(false);
+
+    // init lock snapshots
+    lockIdx = -1;
+    prevLockIdx = -1;
+    lastVal = '';
     snapshotTextarea();
   }
 
-  /* ===== Backspace/Delete/Cut: ONLY within last TWO spaces of typed text ===== */
-  function allowedBackspaceMinBySpaces(val){
-    // indices of literal spaces typed via spacebar
-    var spaces = [];
-    for (var i=0;i<val.length;i++){ if (val[i] === ' ') spaces.push(i); }
-    if (spaces.length <= 2) return 0;                 // if <=2 spaces typed, allow from start
-    return spaces[spaces.length - 3] + 1;             // lock everything before the 3rd-from-last space
+  /* ===== BACKSPACE LOCK: current + previous word only =====
+     Lock boundary = index OF the second-last space (inclusive).
+     Anything at/before boundary is locked.                                  */
+  function computeLockIndex(val){
+    const spaces = [];
+    for (let i = 0; i < val.length; i++){
+      if (val[i] === ' ') spaces.push(i);
+    }
+    if (spaces.length <= 1) return -1;            // < 2 spaces → no lock yet
+    return spaces[spaces.length - 2];             // boundary AT second-last space
   }
 
-  // Snapshots for the input fallback
+  // Never move lock backward (prevents “unlocking” older text)
+  function nextLockIndex(currentVal, currentLock){
+    const cand = computeLockIndex(currentVal);
+    if (currentLock == null || currentLock < 0) return cand;
+    return Math.max(currentLock, cand);
+  }
+
+  // Lock state & snapshots
+  let lockIdx = -1;
+  let prevLockIdx = -1;
   let lastVal = '';
   let lastSelStart = 0;
   let lastSelEnd = 0;
+
   function snapshotTextarea(){
     lastVal = els.inputArea.value;
+    prevLockIdx = lockIdx;
     try{
       lastSelStart = els.inputArea.selectionStart;
       lastSelEnd   = els.inputArea.selectionEnd;
     }catch(_){}
+  }
+
+  function violatesPrefixLock(prev, next, boundary){
+    if (boundary < 0) return false;
+    // boundary is inclusive (space itself locked)
+    return next.slice(0, boundary + 1) !== prev.slice(0, boundary + 1);
   }
 
   /* ===== Flow ===== */
@@ -342,6 +367,10 @@ document.addEventListener('DOMContentLoaded', function(){
     }
     setPassage(passage); setFonts(); highlightProgress();
 
+    // init lock snapshots
+    lockIdx = -1;
+    prevLockIdx = -1;
+    lastVal = '';
     snapshotTextarea();
 
     renderTime();
@@ -405,8 +434,7 @@ document.addEventListener('DOMContentLoaded', function(){
       const span = spans[i];
       const tw = typedWords[i];
       if (tw==null){ continue; }
-      if (tw === refWords[i]) span.classList.add('ok');
-      else { span.classList.add('err'); partial++; }
+      if (tw === refWords[i]) span.classList.add('ok'); else { span.classList.add('err'); partial++; }
     }
     if (typedWords.length < refWords.length){ full = refWords.length - typedWords.length; }
     if (typedWords.length > refWords.length){ partial += (typedWords.length - refWords.length); }
@@ -440,6 +468,7 @@ document.addEventListener('DOMContentLoaded', function(){
       els.grossHI.innerHTML=grossWPM.toFixed(2)+'<span class="u"> WPM</span>';
       els.netHI.innerHTML=netWPM.toFixed(2)+'<span class="u"> WPM</span>';
       els.fullHI.textContent=full; els.partialHI.textContent=partial;
+      els.penaltyHI.innerHTML=penaltyWords+'<span class="u"> Words</span>';
       els.badgeHI.className = passed ? 'pill-pass' : 'pill-fail';
       els.bothResults.classList.remove('hidden'); els.preResultsNote.classList.add('hidden');
     }
@@ -477,85 +506,153 @@ document.addEventListener('DOMContentLoaded', function(){
     }
   });
 
-  /* ===== Updated beforeinput: deny deletion/cut across the boundary ===== */
+  /* ===== Keep caret out of locked region (CURRENT lockIdx) ===== */
+  els.inputArea.addEventListener('select', snapCaretIfNeeded);
+  document.addEventListener('selectionchange', function(){
+    if (!started) return;
+    if (document.activeElement === els.inputArea) snapCaretIfNeeded();
+  });
+  function snapCaretIfNeeded(){
+    if (lockIdx < 0) return; // no lock
+    const s = els.inputArea.selectionStart;
+    const e = els.inputArea.selectionEnd;
+    const leftMost = Math.min(s, e);
+    if (leftMost <= lockIdx){
+      const safe = Math.max(lockIdx + 1, Math.max(s, e));
+      els.inputArea.setSelectionRange(safe, safe);
+    }
+  }
+
+  /* ===== Primary: beforeinput (block edits that cross prevLockIdx) ===== */
   els.inputArea.addEventListener('beforeinput', function(e){
     if (!started) return;
-    var type = e.inputType;
 
-    // Any paste/drop
-    if (type === 'insertFromPaste' || type === 'insertFromDrop'){
+    // Snapshot state BEFORE the incoming change (prevLockIdx set here)
+    snapshotTextarea();
+
+    const t = e.inputType;
+
+    // Block paste/drop
+    if (t === 'insertFromPaste' || t === 'insertFromDrop'){
       showToast('⚠️ CTRL/CMD or Paste not allowed');
-      e.preventDefault(); return;
+      e.preventDefault(); 
+      return;
     }
 
-    // Deletions (backspace, delete, cut)
-    if (type === 'deleteContentBackward' || type === 'deleteContentForward' || type === 'deleteByCut'){
-      var text = e.target.value;
-      var selStart = e.target.selectionStart;
-      var selEnd   = e.target.selectionEnd;
-      var minIdx = allowedBackspaceMinBySpaces(text);
+    const deletionTypes = new Set([
+      'deleteContentBackward','deleteContentForward','deleteByCut',
+      'deleteByComposition','historyUndo','deleteByDrag'
+    ]);
 
-      // If any part of the deletion would cross the boundary, block it
-      var leftMost = Math.min(selStart, selEnd);
-      if (leftMost <= minIdx){ e.preventDefault(); return; }
-    }
-  });
+    // Compute affected range [aStart, aEnd)
+    let s = e.target.selectionStart;
+    let ed = e.target.selectionEnd;
+    let aStart = s, aEnd = ed;
 
-  /* ===== Updated keydown: covers Backspace/Delete + guards + space limit ===== */
-  els.inputArea.addEventListener('keydown', function(e){
-    if (!started) return;
-
-    // Ctrl/Cmd-anything
-    if (e.ctrlKey || e.metaKey){
-      if (e.key !== 'Control' && e.key !== 'Meta'){ showToast('⚠️ CTRL/CMD or Paste not allowed'); }
-      e.preventDefault(); return;
-    }
-    // Shift+Insert paste
-    if (e.shiftKey && e.key === 'Insert'){
-      showToast('⚠️ CTRL/CMD or Paste not allowed');
-      e.preventDefault(); return;
-    }
-
-    // Prevent space after typed words reach passage word count
-    if (e.key === ' '){
-      var refCount = passage.split(/\s+/).length;
-      var typedCount = (els.inputArea.value.trim().length ? els.inputArea.value.trim().split(/\s+/).length : 0);
-      if (typedCount >= refCount){ e.preventDefault(); return; }
-    }
-
-    // Backspace/Delete boundary
-    if (e.key === 'Backspace' || e.key === 'Delete'){
-      var text  = els.inputArea.value;
-      var start = els.inputArea.selectionStart;
-      var end   = els.inputArea.selectionEnd;
-      var minIdx = allowedBackspaceMinBySpaces(text);
-      var leftMost = Math.min(start, end);
-      if (leftMost <= minIdx){ 
+    if (t === 'insertText' || t === 'insertCompositionText'){
+      // Replace selection? If selection touches lock, block.
+      if (s !== ed && Math.min(s, ed) <= prevLockIdx){
         e.preventDefault(); 
-        showToast('Backspace allowed only within last two words');
-        return; 
+        return;
+      }
+      // Insertion at caret within lock is not allowed
+      if (s === ed && s <= prevLockIdx){
+        e.preventDefault(); 
+        return;
+      }
+    } else if (deletionTypes.has(t)){
+      if (s === ed){
+        if (t === 'deleteContentBackward'){ aStart = s - 1; aEnd = s; }
+        else if (t === 'deleteContentForward'){ aStart = s; aEnd = s + 1; }
+      }
+      if (aStart <= prevLockIdx){
+        e.preventDefault(); 
+        return;
       }
     }
   });
 
-  /* ===== Input fallback: revert if prefix got modified (safety net) ===== */
-  els.inputArea.addEventListener('input', function(){
+  /* ===== Keydown fallback (caret movement + delete char semantics) ===== */
+  els.inputArea.addEventListener('keydown', function(e){
     if (!started) return;
 
-    const prev = lastVal;
-    const boundary = allowedBackspaceMinBySpaces(prev);
-    const next = els.inputArea.value;
+    // Snapshot on likely-changing keys
+    const changeKeys = ['Backspace','Delete','Enter',' ','ArrowLeft','Home'];
+    if (e.key && changeKeys.includes(e.key)) snapshotTextarea();
 
-    if (boundary > 0 && next.slice(0, boundary) !== prev.slice(0, boundary)){
-      els.inputArea.value = prev;
-      const safe = boundary + 1;
-      els.inputArea.setSelectionRange(safe, safe);
-      showToast('Backspace allowed only within last two words');
+    // Ctrl/Cmd guards
+    if (e.ctrlKey || e.metaKey){
+      if (e.key !== 'Control' && e.key !== 'Meta'){ showToast('⚠️ CTRL/CMD or Paste not allowed'); }
+      e.preventDefault(); 
+      return;
+    }
+    // Shift+Insert paste
+    if (e.shiftKey && e.key === 'Insert'){
+      showToast('⚠️ CTRL/CMD or Paste not allowed');
+      e.preventDefault(); 
       return;
     }
 
-    // Accept change; update visuals/snapshot
+    // No extra words beyond reference
+    if (e.key === ' '){
+      const val = els.inputArea.value;
+      const refCount = passage.split(/\s+/).length;
+      const typedCount = (val.trim().length ? val.trim().split(/\s+/).length : 0);
+      if (typedCount >= refCount){ e.preventDefault(); return; }
+    }
+
+    const boundary = (typeof prevLockIdx === 'number') ? prevLockIdx : lockIdx;
+
+    if (boundary >= 0){
+      // Prevent caret entering locked region
+      if (e.key === 'ArrowLeft' || e.key === 'Home'){
+        const s = els.inputArea.selectionStart;
+        const en = els.inputArea.selectionEnd;
+        const nextPos = (e.key==='Home') ? 0 : s - 1;
+        if (Math.min(nextPos, en) <= boundary){
+          els.inputArea.setSelectionRange(boundary + 1, boundary + 1);
+          e.preventDefault(); 
+          return;
+        }
+      }
+
+      // Prevent Backspace/Delete that would affect locked chars
+      if (e.key === 'Backspace' || e.key === 'Delete'){
+        const s = els.inputArea.selectionStart;
+        const en = els.inputArea.selectionEnd;
+
+        if (s !== en){
+          if (Math.min(s, en) <= boundary){ e.preventDefault(); return; }
+        } else {
+          if (e.key === 'Backspace' && (s - 1) <= boundary){ e.preventDefault(); return; }
+          if (e.key === 'Delete'    &&  s      <= boundary){ e.preventDefault(); return; }
+        }
+      }
+    }
+  });
+
+  /* ===== Ultimate fallback: input revert + monotonic lock update ===== */
+  els.inputArea.addEventListener('input', function(){
+    if (!started) return;
+
+    const newVal = els.inputArea.value;
+
+    // Revert if locked prefix (up to & including boundary) changed
+    if (violatesPrefixLock(lastVal, newVal, prevLockIdx)){
+      els.inputArea.value = lastVal;
+      const safe = Math.max(prevLockIdx + 1, 0);
+      els.inputArea.setSelectionRange(safe, safe);
+      showToast('Backspace limited to current & previous word');
+      return;
+    }
+
+    // Accept change → update visuals
     highlightProgress();
+
+    // Advance lock boundary (never backwards)
+    lockIdx = nextLockIndex(newVal, lockIdx);
+
+    // Snapshot AFTER acceptance
     snapshotTextarea();
   });
 
